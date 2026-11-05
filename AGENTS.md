@@ -8,6 +8,7 @@ This file provides guidance when working with code in this repository.
 - `cargo run` / `./script/run` - Build and run the GUI desktop app locally
 - `./script/run-tui` - Build and run the headless TUI front-end (`crates/warp_tui`)
 - `cargo bundle --bin warp` - Bundle the main (GUI) app
+- `./script/linux/build_local_rpm` - Build an installable open-source-channel RPM (`warp-terminal-oss`, installs next to the released `warp-terminal`) of the committed HEAD at `target/rpm/warp-terminal-oss-local.rpm` (install with `sudo dnf5 install ./target/rpm/warp-terminal-oss-local.rpm`); `--print-version` prints its version without building. Only the oss channel builds without the private channel-config repository. It needs `cargo-about` (`script/install_cargo_release_deps --no-build-deps`), `rpm-build` and `fakeroot`. The version is dated at the commit time, so a newer build upgrades an older one. On the oss channel the SSH remote server installs the newest dev-channel CLI whatever this build's version (`crates/remote_server/src/setup.rs`), so the two may not match.
 
 ### Running with local warp-server
 To connect Warp client to a local warp-server instance:

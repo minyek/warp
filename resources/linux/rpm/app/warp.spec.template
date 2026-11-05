@@ -215,6 +215,11 @@ if [ -f "/etc/os-release" ]; then
 	esac
 fi
 
+# The oss channel has no published package repository to configure.
+if [ "@@RELEASE_CHANNEL@@" = "oss" ]; then
+	PACKAGE_MANAGER=""
+fi
+
 # Make sure the package manager is configured with our repository.
 case $PACKAGE_MANAGER in
 	"yum")

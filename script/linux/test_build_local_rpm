@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+workspace_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+temp_dir="$(mktemp -d)"
+trap 'rm -rf "$temp_dir"' EXIT
+
+fail() {
+  echo "FAIL: $*" >&2
+  exit 1
+}
+
+version=$("$workspace_root/script/linux/build_local_rpm" --print-version)
+
+# The app parses this form to compare versions (crates/channel_versions).
+[[ $version =~ ^v0\.[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]{2}\.[0-9]{2}\.oss_99$ ]] \
+  || fail "version '$version' does not match vN.YYYY.MM.DD.HH.MM.oss_NN"
+
+# RPM must rank it above a build of an older commit, so dnf sees an upgrade.
+older=v0.2000.01.01.00.00.oss_02
+[[ $(rpm --eval "%{lua: print(rpm.vercmp('$version', '$older'))}") == 1 ]] \
+  || fail "'$version' does not sort above '$older'"
+
+repo="$temp_dir/repo"
+git clone -q --shared --no-checkout "$workspace_root" "$repo"
+git -C "$repo" sparse-checkout set --no-cone /Cargo.toml /script/ /resources/ /app/channels/oss/
+git -C "$repo" checkout -q --detach "$(git -C "$workspace_root" rev-parse HEAD)"
+cp "$workspace_root/script/linux/build_local_rpm" "$repo/script/linux/build_local_rpm"
+git -C "$repo" add script/linux/build_local_rpm
+GIT_COMMITTER_DATE=2001-02-03T04:05:06Z git -C "$repo" -c user.name=test \
+  -c user.email=test@example.com commit -q --allow-empty -m "pin the commit time"
+pinned_version=v0.2001.02.03.04.05.oss_99
+
+# The version is HEAD's commit time in UTC, whatever the local time zone.
+[[ $(cd "$repo" && TZ=Pacific/Kiritimati script/linux/build_local_rpm --print-version) \
+  == "$pinned_version" ]] || fail "the version is not HEAD's commit time in UTC"
+
+# A run packages the real bundle's RPM at the fixed path. The cargo stub stands in for the build;
+# RUSTC=false makes any real cargo fail at once instead of compiling.
+stubs="$temp_dir/stubs"
+mkdir -p "$stubs"
+cat > "$stubs/cargo" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$STUB_CARGO_LOG"
+while (($#)); do
+  case $1 in
+    --profile) profile=$2; shift 2 ;;
+    --bin) bin=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+mkdir -p "target/$profile"
+cp /usr/bin/true "target/$profile/$bin"
+EOF
+chmod +x "$stubs/cargo"
+(cd "$repo" && env -u CARGO_TARGET_DIR PATH="$stubs:$PATH" RUSTC=false STUB_CARGO_LOG="$temp_dir/cargo.log" \
+  SKIP_SETTINGS_SCHEMA=1 NO_LICENSES=1 script/linux/build_local_rpm > "$temp_dir/run.log" 2>&1) \
+  || fail "the stubbed run failed: $(tail -5 "$temp_dir/run.log")"
+grep -q -- "--profile release-lto --bin warp-oss" "$temp_dir/cargo.log" \
+  || fail "the bundle did not build the oss binary: $(cat "$temp_dir/cargo.log")"
+[[ $(rpm -qp --nosignature --qf '%{NAME} %{VERSION} %{RELEASE}' \
+  "$repo/target/rpm/warp-terminal-oss-local.rpm") == "warp-terminal-oss $pinned_version 1" ]] \
+  || fail "target/rpm/warp-terminal-oss-local.rpm is missing or is not warp-terminal-oss $pinned_version"
+
+# The oss channel has no published package repository, so installing must not configure one.
+fake_root="$temp_dir/fake-root"
+mkdir -p "$fake_root/etc/yum.repos.d"
+printf 'ID=fedora\n' > "$fake_root/etc/os-release"
+rpm -qp --nosignature --qf '%{POSTIN}' "$repo/target/rpm/warp-terminal-oss-local.rpm" \
+  | sed -e "s#/etc/#$fake_root/etc/#g" -e 's/update-desktop-database$/true/' > "$temp_dir/postin"
+bash "$temp_dir/postin" || fail "the RPM's install script failed"
+[[ -z $(ls -A "$fake_root/etc/yum.repos.d") ]] \
+  || fail "installing the RPM configures a package repository: $(ls "$fake_root/etc/yum.repos.d")"
+
+printf '#!/usr/bin/env bash\nexit 7\n' > "$repo/script/linux/bundle"
+git -C "$repo" update-index --assume-unchanged script/linux/bundle
+
+# An unknown argument must not start a build.
+status=0
+(cd "$repo" && script/linux/build_local_rpm --help > /dev/null 2>&1) || status=$?
+[[ $status == 2 ]] || fail "an unknown argument exited with $status instead of 2"
+
+# A missing build tool must stop the run before the bundle starts compiling.
+no_about="$temp_dir/no-about"
+mkdir -p "$no_about"
+printf '#!/usr/bin/env bash\nexit 101\n' > "$no_about/cargo"
+chmod +x "$no_about/cargo"
+status=0
+output=$(cd "$repo" && env -u NO_LICENSES PATH="$no_about:$PATH" script/linux/build_local_rpm 2>&1) \
+  || status=$?
+[[ $status == 1 && $output == "cargo-about is missing"* ]] \
+  || fail "a missing cargo-about did not stop the run first: exit $status: $output"
+no_rpmbuild="$temp_dir/no-rpmbuild"
+mkdir -p "$no_rpmbuild"
+for tool in bash git date dirname; do ln -s "$(command -v "$tool")" "$no_rpmbuild/$tool"; done
+status=0
+output=$(cd "$repo" && NO_LICENSES=1 PATH="$no_rpmbuild" script/linux/build_local_rpm 2>&1) \
+  || status=$?
+[[ $status == 1 && $output == "rpmbuild is missing"* ]] \
+  || fail "a missing rpmbuild did not stop the run first: exit $status: $output"
+no_fakeroot="$temp_dir/no-fakeroot"
+mkdir -p "$no_fakeroot"
+for tool in bash git date dirname rpmbuild; do ln -s "$(command -v "$tool")" "$no_fakeroot/$tool"; done
+status=0
+output=$(cd "$repo" && NO_LICENSES=1 PATH="$no_fakeroot" script/linux/build_local_rpm 2>&1) \
+  || status=$?
+[[ $status == 1 && $output == "fakeroot is missing"* ]] \
+  || fail "a missing fakeroot did not stop the run first: exit $status: $output"
+
+# A modified tracked file must stop the build before it starts.
+echo "dirty" >> "$repo/Cargo.toml"
+if output=$(cd "$repo" && script/linux/build_local_rpm 2>&1); then
+  fail "build ran with a modified tracked file"
+fi
+[[ $output == *"Refusing to build with modified tracked files"* ]] \
+  || fail "unexpected refusal message: $output"
+
+echo "PASS"

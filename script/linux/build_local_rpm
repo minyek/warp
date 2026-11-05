@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+#
+# Builds an installable open-source-channel (`warp-terminal-oss`) RPM of the committed HEAD.
+#
+# Every other channel's bundle embeds a config from a private repository, so only the oss
+# channel builds from this checkout. Its package name differs from the released `warp-terminal`,
+# so it installs alongside that package and neither replaces nor is replaced by it.
+#
+# The version is `v0.<HEAD commit time, UTC, YYYY.MM.DD.HH.MM>.oss_99`. It matches the
+# `vN.YYYY.MM.DD.HH.MM.channel_NN` form the app parses, so the app compares it with
+# other versions instead of failing to parse it. It sorts above any local build made before the
+# commit, so `dnf install` treats a newer RPM as an upgrade of `warp-terminal-oss`.
+# On the oss channel the SSH remote server installs the newest dev-channel CLI whatever this
+# build's version (crates/remote_server/src/setup.rs), so the two may not match.
+#
+# Usage: script/linux/build_local_rpm [--print-version]
+#   --print-version  Print the version and exit without building.
+#
+# Output: target/rpm/warp-terminal-oss-local.rpm. Installing it needs root and is left to the user.
+
+set -Eeuo pipefail
+
+repo_root=$(git -C "$(dirname -- "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)
+
+commit_epoch=$(git -C "$repo_root" show -s --format=%ct HEAD)
+version="v0.$(date -u -d "@$commit_epoch" '+%Y.%m.%d.%H.%M').oss_99"
+
+if [[ $# -gt 1 || ($# -eq 1 && $1 != --print-version) ]]; then
+    printf 'Usage: script/linux/build_local_rpm [--print-version]\n' >&2
+    exit 2
+fi
+if [[ $# -eq 1 ]]; then
+    printf '%s\n' "$version"
+    exit 0
+fi
+
+# The bundle builds the working tree, so its tracked files must equal HEAD for the version to
+# describe it. Untracked files are not checked.
+if [[ -n $(git -C "$repo_root" status --porcelain --untracked-files=no) ]]; then
+    printf 'Refusing to build with modified tracked files. Commit or revert them first.\n' >&2
+    exit 1
+fi
+
+# The bundle compiles for a long time before rpmbuild needs these tools, so check them first.
+if [[ -z ${NO_LICENSES:-} ]] && ! cargo about --version >/dev/null 2>&1; then
+    printf 'cargo-about is missing; the bundle needs it to write the license file. Install it from the repository root with script/install_cargo_release_deps --no-build-deps.\n' >&2
+    exit 1
+fi
+for tool in rpmbuild fakeroot; do
+    if ! command -v "$tool" >/dev/null; then
+        printf '%s is missing. Install it with: sudo dnf5 install rpm-build fakeroot\n' "$tool" >&2
+        exit 1
+    fi
+done
+
+cd "$repo_root"
+script/linux/bundle --channel oss --release-tag "$version" --packages rpm
+
+arch=$(rpm --eval '%{_arch}')
+built_rpm="${CARGO_TARGET_DIR:-$repo_root/target}/release-lto/bundle/linux/warp-terminal-oss-$version-1.$arch.rpm"
+if [[ ! -f $built_rpm ]]; then
+    printf 'The bundle finished but did not produce the expected RPM: %s\n' "$built_rpm" >&2
+    exit 1
+fi
+
+mkdir -p "$repo_root/target/rpm"
+install -m 0644 "$built_rpm" "$repo_root/target/rpm/warp-terminal-oss-local.rpm"
+printf 'Built RPM: %s\n' "$built_rpm"
+printf 'Installable path: %s\n' "$repo_root/target/rpm/warp-terminal-oss-local.rpm"
