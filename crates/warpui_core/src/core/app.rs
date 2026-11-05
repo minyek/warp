@@ -1152,6 +1152,34 @@ impl AppContext {
             });
     }
 
+    /// Number of subscriptions currently registered on `entity_id`, across all subscribers.
+    #[cfg(feature = "test-util")]
+    pub fn subscription_count(&self, entity_id: EntityId) -> usize {
+        self.subscriptions.get(&entity_id).map_or(0, Vec::len)
+    }
+
+    /// Number of subscriptions that the view `subscriber_view_id` holds on `entity_id`.
+    #[cfg(feature = "test-util")]
+    pub fn view_subscription_count(
+        &self,
+        entity_id: EntityId,
+        subscriber_view_id: EntityId,
+    ) -> usize {
+        self.subscriptions
+            .get(&entity_id)
+            .map_or(0, |subscriptions| {
+                subscriptions
+                    .iter()
+                    .filter(|subscription| {
+                        matches!(
+                            subscription,
+                            Subscription::FromView { view_id, .. } if *view_id == subscriber_view_id
+                        )
+                    })
+                    .count()
+            })
+    }
+
     #[cfg(feature = "test-util")]
     pub(crate) fn register_spawned_future(&mut self, future: SpawnedFuture) -> FutureId {
         let future_id = FutureId::new();

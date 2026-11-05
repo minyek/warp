@@ -5824,3 +5824,102 @@ fn test_tab_group_rename_blur_does_not_commit_unfinished_name() {
         });
     });
 }
+
+#[test]
+fn test_switching_tabs_does_not_accumulate_pane_group_subscriptions() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        let (first_pane_group_id, second_pane_group_id) =
+            workspace.update(&mut app, |workspace, ctx| {
+                workspace.add_terminal_tab(false, ctx);
+                (
+                    workspace.get_pane_group_view(0).unwrap().id(),
+                    workspace.get_pane_group_view(1).unwrap().id(),
+                )
+            });
+
+        let count_subscriptions = |app: &App| {
+            app.read(|ctx| {
+                (
+                    ctx.subscription_count(first_pane_group_id),
+                    ctx.subscription_count(second_pane_group_id),
+                )
+            })
+        };
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.activate_tab(0, ctx);
+            workspace.activate_tab(1, ctx);
+        });
+        let after_first_visit = count_subscriptions(&app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            for _ in 0..5 {
+                workspace.activate_tab(0, ctx);
+                workspace.activate_tab(1, ctx);
+            }
+        });
+
+        assert_eq!(
+            count_subscriptions(&app),
+            after_first_visit,
+            "revisiting tabs must not add subscriptions to their pane groups"
+        );
+    });
+}
+
+// The right panel recomputes terminal availability from the active pane group's events, so it
+// holds exactly one subscription on the active pane group and none on the others, also when the
+// already active tab is activated again.
+#[test]
+fn test_right_panel_subscribes_once_to_the_active_pane_group_only() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        let (first_pane_group_id, second_pane_group_id, right_panel_id) =
+            workspace.update(&mut app, |workspace, ctx| {
+                workspace.add_terminal_tab(false, ctx);
+                (
+                    workspace.get_pane_group_view(0).unwrap().id(),
+                    workspace.get_pane_group_view(1).unwrap().id(),
+                    workspace.right_panel_view.id(),
+                )
+            });
+
+        let right_panel_subscriptions = |app: &App| {
+            app.read(|ctx| {
+                (
+                    ctx.view_subscription_count(first_pane_group_id, right_panel_id),
+                    ctx.view_subscription_count(second_pane_group_id, right_panel_id),
+                )
+            })
+        };
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.activate_tab(1, ctx);
+            workspace.activate_tab(0, ctx);
+        });
+        assert_eq!(
+            right_panel_subscriptions(&app),
+            (1, 0),
+            "after switching to the first tab"
+        );
+
+        workspace.update(&mut app, |workspace, ctx| workspace.activate_tab(0, ctx));
+        assert_eq!(
+            right_panel_subscriptions(&app),
+            (1, 0),
+            "after activating the already active first tab"
+        );
+
+        workspace.update(&mut app, |workspace, ctx| workspace.activate_tab(1, ctx));
+        assert_eq!(
+            right_panel_subscriptions(&app),
+            (0, 1),
+            "after switching to the second tab"
+        );
+    });
+}

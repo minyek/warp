@@ -649,6 +649,10 @@ impl RightPanelView {
     ) {
         let pane_group_id = pane_group.id();
 
+        if let Some(previous_pane_group) = &self.active_pane_group {
+            ctx.unsubscribe_to_view(previous_pane_group);
+        }
+
         // Subscribe to pane group events so we can recompute terminal
         // availability when terminal state changes (e.g. command
         // starts/finishes).
